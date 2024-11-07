@@ -143,7 +143,14 @@ def send_query_to_db(query):
     )
     if r.status_code == 400:
         print(query)
-    return r.json()["results"]["bindings"]
+    try:
+        if r.json().get("boolean"):
+            return r.json()["boolean"]
+        else:
+            return r.json()["results"]["bindings"]
+    except Exception as e:
+        print(query)
+        return {}
 
 
 def upload_file_to_db(ttl_file: Path, graph_iri: str):
@@ -155,3 +162,9 @@ def upload_file_to_db(ttl_file: Path, graph_iri: str):
     )
 
     return r.status_code, r.text
+
+
+def replace_all(text, dic):
+    for i, j in dic.items():
+        text = text.replace(i, j)
+    return text
