@@ -139,9 +139,11 @@ def send_query_to_db(query):
     r = httpx.get(
         "http://localhost:3030/ds",
         headers={"Accept": "application/sparql-results+json"},
-        params={"query": query}
+        params={"query": query},
+        timeout=20
     )
     if r.status_code == 400:
+        print(r.text)
         print(query)
     try:
         if r.json().get("boolean"):
@@ -149,6 +151,7 @@ def send_query_to_db(query):
         else:
             return r.json()["results"]["bindings"]
     except Exception as e:
+        print(e)
         print(query)
         return {}
 
