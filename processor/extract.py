@@ -42,23 +42,25 @@ def get_kws_per_thes(kw_set: etree, prefix, prefix_2, namespaces) -> []:
         )
 
         anchor_keywords = md_keyword.xpath(
-            f"gmx:Anchor",  # /
+            f"gmx:Anchor",
             namespaces=namespaces)
 
         improved_anchor_keywords = []
         for ak in anchor_keywords:
             link = ak.xpath("./@xlink:href", namespaces=namespaces)
 
+            # when the anchor is telling us that the kw is a 'theme' kw...
             if len(link) >= 1:
-                if link[0] == "" and ak.text is None:
-                    continue
-
-            txt = str_tidy(ak.text)
-
-            if len(link) >= 1 and link != "http://inspire.ec.europa.eu/theme/of":
-                improved_anchor_keywords.append(link[0])
+                if link[0] == "http://inspire.ec.europa.eu/theme/of":
+                    # print({"value": str_tidy(ak.text), "theme": "theme"})
+                    kws.append({"value": str_tidy(ak.text), "theme": "theme"})
+                else:
+                    improved_anchor_keywords.append(link[0])
+            elif ak.text is not None:
+                improved_anchor_keywords.append(str_tidy(ak.text))
             else:
-                improved_anchor_keywords.append(txt)
+                # discard empty result
+                continue
 
         for x in text_keywords + improved_anchor_keywords:
             kw = x if x.startswith("http") else str_tidy(x)
@@ -161,7 +163,7 @@ def get_thes_and_kws(path_to_file_or_etree: Union[Path, etree], profile: Optiona
 def match_thes_to_kb(thes_iri: str, thes_name: str) -> {}:
     # see if we have an aliasFor IRI for this thesaurus
     q = """
-        PREFIX sa: <http://w3id.org/semanticanalyser/>
+        PREFIX sa: <https://w3id.org/semanticanalyser/>
         
         SELECT ?iri
         WHERE {
@@ -178,7 +180,7 @@ def match_thes_to_kb(thes_iri: str, thes_name: str) -> {}:
         # if not, see if we can name match the thesaurus
         q = """
             PREFIX dcat: <http://www.w3.org/ns/dcat#>
-            PREFIX sa: <http://w3id.org/semanticanalyser/>
+            PREFIX sa: <https://w3id.org/semanticanalyser/>
             PREFIX schema: <https://schema.org/>
             PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
             
@@ -237,6 +239,12 @@ def match_thes_to_kb(thes_iri: str, thes_name: str) -> {}:
 
 
 def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
+    if kw_iri is not None:
+        if "https://www.ncei.noaa.gov/archive/accession/" in kw_iri:
+            return kw_iri
+        if "https://www.ncei.noaa.gov/archive/archive-management-system" in kw_iri:
+            return kw_iri
+
     if "/" in kw_text:
         if kw_text.endswith("/"):
             kw_text = kw_text.split("/")[-2].strip()
@@ -342,7 +350,7 @@ def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
                 }
                 ORDER BY DESC(?weight)
                 LIMIT 3        
-                """.replace("XXX", thes_iri).replace("ZZZ", kw_text)
+                """.replace("YYY", thes_iri).replace("ZZZ", kw_text)
     else:
         if kw_iri is not None:
             q = """
@@ -376,6 +384,7 @@ def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
                 LIMIT 3
                 """.replace("ZZZ", kw_text)
 
+    # print(q)
     r = send_query_to_db(q)
 
     if len(r) > 0:
@@ -439,6 +448,9 @@ def get_best_guess_kws(path_to_file_or_etree: Union[Path, etree]):
         for kw in content["keywords"]:
             kw_iri = kw["value"] if kw["value"].startswith("http") else None
             val = match_kw_to_kb(kw["value"], kw_iri, thesaurus)
+            # print(kw)
+            # print(kw_iri)
+            # print(val)
 
             theme = kw["theme"]
             improved_kws.append({
@@ -488,6 +500,7 @@ def present_results(thesauri):
 
 def convert_results_to_graph(thesauri: {}, doc_iri: str) -> Graph:
     g = Graph()
+    g.add((URIRef(doc_iri), RDF.type, SDO.CreativeWork))
     for thesaurus, content in thesauri.items():
         for kw in content["keywords"]:
             if kw["value"].startswith("http"):
@@ -502,6 +515,9 @@ def convert_results_to_graph(thesauri: {}, doc_iri: str) -> Graph:
                     g.add((kw_iri, SDO.replacee, URIRef(kw["original"])))
                 else:
                     g.add((kw_iri, SDO.citation, Literal(kw["original"])))
+            else:
+                if not kw["original"].startswith("http"):
+                    g.add((kw_iri, SDO.value, Literal(kw["original"])))
 
             if kw["thesaurus"] is not None:
                 if kw["thesaurus"].startswith("http"):
@@ -510,6 +526,7 @@ def convert_results_to_graph(thesauri: {}, doc_iri: str) -> Graph:
                     g.add((kw_iri, SDO.inDefinedTermSet, Literal(kw["thesaurus"])))
 
             g.add((URIRef(doc_iri), SDO.keywords, kw_iri))
+    g.add((URIRef(doc_iri), RDF.type, SDO.CreativeWork))
 
     return g
 
@@ -524,7 +541,6 @@ def process_all_records(starting_record: None = 1, no_to_process: None = 100):
             continue
 
         record_path = records_dir.joinpath(record.strip())
-        print(record_path)
 
         # Process the record
         doc_iri, thesauri = get_best_guess_kws(record_path)
@@ -548,18 +564,39 @@ if __name__ == "__main__":
     # fn = "f089a39e-a589-4b69-ab61-1ad4bb9a9d2a.xml"  #
     # fn = "cfee79a4-207c-4522-93fb-d230f9cff85e.xml"  # 7
     # fn = "4F44B923286F59CFEF35E1C5F4B9838008717C26.xml"
-    fn = "F339039A8B322A39F1AFEF986AC60E3276896D10.xml"
-    record_sample = [Path("/Users/nick/Work/bodc/sa-records/no-dashes") / fn]
+    # fn = "F339039A8B322A39F1AFEF986AC60E3276896D10.xml"
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/dashes") / fn]
+
 
     # record_sample = sample_records(3)
-    #
+
+    #record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/0098a856-7401-46c2-9f7a-a2e5c0cf899c.xml")]
+    #   * missing target application vocab online - https://sextant.ifremer.fr/geonetwork/srv/api/registries/vocabularies/local.target-application.myocean.target-application
+
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/sdn-open:urn:SDN:CDI:LOCAL:696-486-486-ds07-4.xml")]
+    # 100%
+
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/f632d0d4-3373-43a4-a6be-d2109ebe0177.xml")]
+    # 100%
+
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/01f36842-927c-43a8-a531-f3c5096f3b34.xml")]
+    # 21/37 - no thes for non-matches
+
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/0c6e6b99-eaa6-41f7-b9f5-8a84d60b02b0.xml")]
+    # 100s of Accession Records
+    # GCMD Providers vocab missed <https://gcmd.earthdata.nasa.gov/kms/concept/086c68e5-1c94-4f2f-89d5-0453443ff249> - added
+    # GCSM Science Keywords missing <https://gcmd.earthdata.nasa.gov/kms/concept/cd5a4729-ea4a-4ce1-8f5a-ec6a76d31055> - not yet added
+
+    record_sample = sorted(Path("/Users/nick/Work/bodc/sa-records/ifremer").glob("*.xml"))
+    count = 0
     for r in record_sample:
         doc_iri, thesauri = get_best_guess_kws(r)
-        print(r)
         present_results(thesauri)
-        with open("record-keywords.2.nt", "a") as f:
+        with open(Path(__file__).parent / "ifremer-record-keywords.nt", "a") as f:
             f.write(convert_results_to_graph(thesauri, doc_iri).serialize(format="nt"))
             f.write("\n\n")
+        count += 1
+        print(f"record no. {count}")
 
     # process_all_records(5000, 1001)
 
