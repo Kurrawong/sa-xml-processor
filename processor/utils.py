@@ -153,6 +153,7 @@ def send_query_to_db(query):
     except Exception as e:
         print(e)
         print(query)
+        exit()
         return {}
 
 

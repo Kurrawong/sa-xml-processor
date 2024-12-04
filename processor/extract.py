@@ -239,10 +239,25 @@ def match_thes_to_kb(thes_iri: str, thes_name: str) -> {}:
 
 
 def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
+    kw_cache = {
+        "earth science > paleoclimate > tree ring": "https://gcmd.earthdata.nasa.gov/kms/concept/0e06e528-e796-4b7c-9878-dbcb061d878d",
+        "What: total ring width; Material: null": "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=3639",
+        "What: tree ring standardized growth index; Material: null": "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=682",
+        "What: age; Material: null": "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=241"
+
+    }
+    if kw_text in kw_cache.keys():
+        return kw_cache[kw_text]
+    elif kw_text.startswith("What:"):
+        kw_text = kw_text.replace("What: ", "")
+        kw_text = kw_text.split(";")[0].strip()
+
     if kw_iri is not None:
         if "https://www.ncei.noaa.gov/archive/accession/" in kw_iri:
             return kw_iri
         if "https://www.ncei.noaa.gov/archive/archive-management-system" in kw_iri:
+            return kw_iri
+        if kw_iri.startswith("http://vocab.nerc.ac.uk"):
             return kw_iri
 
     if "/" in kw_text:
@@ -384,7 +399,6 @@ def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
                 LIMIT 3
                 """.replace("ZZZ", kw_text)
 
-    # print(q)
     r = send_query_to_db(q)
 
     if len(r) > 0:
@@ -560,14 +574,8 @@ def process_all_records(starting_record: None = 1, no_to_process: None = 100):
 
 
 if __name__ == "__main__":
-    # fn = "87ed5a7d-3de5-426c-be8d-5c1f1fe224ca.xml"  # none
-    # fn = "f089a39e-a589-4b69-ab61-1ad4bb9a9d2a.xml"  #
-    # fn = "cfee79a4-207c-4522-93fb-d230f9cff85e.xml"  # 7
-    # fn = "4F44B923286F59CFEF35E1C5F4B9838008717C26.xml"
-    # fn = "F339039A8B322A39F1AFEF986AC60E3276896D10.xml"
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/dashes") / fn]
-
-
+    start = time.time()
+    resulting_nt_file = Path(__file__).parent / "noaa-paleoclimatlog-keywords.nt"
     # record_sample = sample_records(3)
 
     #record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/0098a856-7401-46c2-9f7a-a2e5c0cf899c.xml")]
@@ -587,16 +595,40 @@ if __name__ == "__main__":
     # GCMD Providers vocab missed <https://gcmd.earthdata.nasa.gov/kms/concept/086c68e5-1c94-4f2f-89d5-0453443ff249> - added
     # GCSM Science Keywords missing <https://gcmd.earthdata.nasa.gov/kms/concept/cd5a4729-ea4a-4ce1-8f5a-ec6a76d31055> - not yet added
 
-    record_sample = sorted(Path("/Users/nick/Work/bodc/sa-records/ifremer").glob("*.xml"))
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/a54ac0ea-b4f9-48cb-ae55-f84c78848a28.xml")]
+    # 100%
+
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog/0be5e200-0742-4744-8b31-337f7144d444.xml")]
+    # 23s
+
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog/0be5e200-0742-4744-8b31-337f7144d444.2.xml")]
+    # dedupe
+    # 4s
+
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog/fff282ca-6097-4660-a416-73d3ba3d768f.xml")]
+    # 2s
+
+    #record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe/fff282ca-6097-4660-a416-73d3ba3d768f.xml")]
+    # dedupe
+    # 2s
+
+    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe/93c28262-4a53-4383-966e-8f088e8a3723.xml")]
+
+    record_sample = sorted(Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe").glob("*.xml"))
+    start = 15071
     count = 0
-    for r in record_sample:
+    for r in record_sample[start:]:
+        print(r)
         doc_iri, thesauri = get_best_guess_kws(r)
         present_results(thesauri)
-        with open(Path(__file__).parent / "ifremer-record-keywords.nt", "a") as f:
+        with open(resulting_nt_file, "a") as f:
             f.write(convert_results_to_graph(thesauri, doc_iri).serialize(format="nt"))
             f.write("\n\n")
         count += 1
         print(f"record no. {count}")
+
+    end = time.time()
+    print("time: " + str(end - start))
 
     # process_all_records(5000, 1001)
 
