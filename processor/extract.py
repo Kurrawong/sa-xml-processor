@@ -9,7 +9,9 @@ from hashlib import sha1
 from rdflib import Graph, BNode, Literal, URIRef
 from rdflib.namespace import RDF, SDO
 
-import time
+from time import perf_counter
+
+import pickle
 
 
 class Profile(Enum):
@@ -49,8 +51,9 @@ def get_kws_per_thes(kw_set: etree, prefix, prefix_2, namespaces) -> []:
         for ak in anchor_keywords:
             link = ak.xpath("./@xlink:href", namespaces=namespaces)
 
-            # when the anchor is telling us that the kw is a 'theme' kw...
-            if len(link) >= 1:
+
+            if len(link) >= 1 and link[0] != "":
+                # when the anchor is telling us that the kw is a 'theme' kw...
                 if link[0] == "http://inspire.ec.europa.eu/theme/of":
                     # print({"value": str_tidy(ak.text), "theme": "theme"})
                     kws.append({"value": str_tidy(ak.text), "theme": "theme"})
@@ -66,7 +69,149 @@ def get_kws_per_thes(kw_set: etree, prefix, prefix_2, namespaces) -> []:
             kw = x if x.startswith("http") else str_tidy(x)
             th = theme[0] if len(theme) > 0 else None
             kws.append({"value": kw, "theme": th})
+
     return kws
+
+
+def match_thes_to_kb(thes_iri: str, thes_name: str) -> {}:
+    # see if we have an aliasFor IRI for this thesaurus
+    q = """
+        PREFIX sa: <https://w3id.org/semanticanalyser/>
+        PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+
+        SELECT ?iri ?name
+        WHERE {
+          GRAPH sa:system-graph {
+            ?iri sa:hasAlias <XXXX> ;
+                skos:prefLabel ?name .
+          }
+        }    
+        """.replace("XXXX", thes_iri)
+    r = send_query_to_db(q)
+    if len(r) > 0:
+        return r[0]["iri"]["value"], r[0]["name"]["value"]
+
+    if thes_name is not None:
+        # if not, see if we can name match the thesaurus
+        q = """
+            PREFIX dcat: <http://www.w3.org/ns/dcat#>
+            PREFIX sa: <https://w3id.org/semanticanalyser/>
+            PREFIX schema: <https://schema.org/>
+            PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+
+            SELECT ?iri ?l
+            WHERE {
+              {
+                SELECT DISTINCT ?iri ?l ?w ?p ?theme
+                WHERE {
+                  GRAPH sa:system-graph {
+                    {     
+                      BIND (10 AS ?w)
+                      ?iri skos:prefLabel ?l .          
+
+                      FILTER (?l = "XXXX")
+                    }
+                    UNION
+                    { 
+                      BIND (9 AS ?w)
+                      ?iri skos:altLabel ?l .
+
+                      FILTER (?l = "XXXX")
+                    }
+                    UNION
+                    {     
+                      BIND (8 AS ?w)
+                      ?iri skos:prefLabel ?l .          
+
+                      FILTER (CONTAINS(?l, "XXXX"))
+                    }
+                    UNION
+                    { 
+                      BIND (7 AS ?w)
+                      ?iri skos:altLabel ?l .
+
+                      FILTER (CONTAINS(?l, "XXXX"))
+                    }
+
+                    OPTIONAL {
+                      ?iri sa:hasPreference [
+                        schema:value ?p ;
+                        dcat:theme ?theme ;
+                      ] .        
+                    }
+                  }  
+                }
+                ORDER BY DESC(?w)
+              }
+              FILTER (?w > 8)  # exact prefLabel and altLabel matches only for now
+          }
+        """.replace("XXXX", thes_name)
+        r = send_query_to_db(q)
+        if len(r) > 0:
+            return r[0]["iri"]["value"], r[0]["l"]["value"]
+
+    return None, None
+
+
+def match_thesaurus(thesaurus, namespaces, prefix_2):
+    thesaurus_iris = thesaurus.xpath(f"@xlink:href", namespaces=namespaces)
+    if len(thesaurus_iris) > 0:
+        thesaurus_iri = thesaurus_iris[0]
+    else:
+        thesaurus_iris = thesaurus.xpath(
+            f"{prefix_2}:CI_Citation/{prefix_2}:identifier/{prefix_2}:MD_Identifier/{prefix_2}:code/gco:CharacterString/text()",
+            namespaces=namespaces,
+        )
+        if len(thesaurus_iris) > 0:
+            thesaurus_iri = thesaurus_iris[0]
+        else:
+            thesaurus_iris = thesaurus.xpath(
+                f"{prefix_2}:CI_Citation/{prefix_2}:identifier/{prefix_2}:MD_Identifier/{prefix_2}:code/gmx:Anchor/@xlink:href",
+                namespaces=namespaces,
+            )
+            if len(thesaurus_iris) > 0:
+                thesaurus_iri = thesaurus_iris[0]
+            else:
+                thesaurus_iri = None
+
+    # try and use thesaurus cache
+    # a, b = thes_cache_get(thesaurus_iri)
+    # if a is not None and b is not None:
+    #     return a, b
+
+    original_thesaurus_iri = thesaurus_iri
+
+    thesaurus_names = thesaurus.xpath(f"@xlink:title", namespaces=namespaces)
+    if len(thesaurus_names) > 0:
+        thesaurus_name = thesaurus_names[0]
+    else:
+        thesaurus_names = thesaurus.xpath(
+            f"{prefix_2}:CI_Citation/{prefix_2}:title/gco:CharacterString/text()",
+            namespaces=namespaces,
+        )
+        if len(thesaurus_names) > 0:
+            thesaurus_name = thesaurus_names[0]
+        else:
+            thesaurus_name = None
+
+    # if we have a thesaurus IRI, see if we have an aliasFor IRI for it
+    if thesaurus_iri is not None:
+        alias_iri, alias_name = match_thes_to_kb(thesaurus_iri, thesaurus_name)
+        if alias_iri is not None:
+            thesaurus_iri = alias_iri
+            thesaurus_name = alias_name
+
+    # no matches of any kind so return nothing
+    if thesaurus_iri is None and thesaurus_name is None:
+        return None, None
+
+    if thesaurus_iri is None and thesaurus_name is not None:
+        thesaurus_iri = make_thesaurus_iri(thesaurus_name)
+
+    improved_name = thesaurus_name.strip() if thesaurus_name is not None else None
+
+    THES_CACHE.add((original_thesaurus_iri, thesaurus_iri, improved_name))
+    return thesaurus_iri, improved_name
 
 
 def get_thes_and_kws(path_to_file_or_etree: Union[Path, etree], profile: Optional[Profile] = None, doc_iri: Optional[str] = None) -> {}:
@@ -98,160 +243,46 @@ def get_thes_and_kws(path_to_file_or_etree: Union[Path, etree], profile: Optiona
         namespaces=namespaces,
     )
     for keyword_set in keyword_sets:
+        kws = get_kws_per_thes(keyword_set, prefix, prefix_2, namespaces)
+
         thesauruses = keyword_set.xpath(
             f"{prefix}:thesaurusName",
             namespaces=namespaces,
         )
 
-        kws = get_kws_per_thes(keyword_set, prefix, prefix_2, namespaces)
-
-        for thesaurus in thesauruses:
-            thesaurus_iris = thesaurus.xpath(f"@xlink:href", namespaces=namespaces)
-            if len(thesaurus_iris) > 0:
-                thesaurus_iri = thesaurus_iris[0]
-            else:
-                thesaurus_iris = thesaurus.xpath(
-                    f"{prefix_2}:CI_Citation/{prefix_2}:identifier/{prefix_2}:MD_Identifier/{prefix_2}:code/gco:CharacterString/text()",
-                    namespaces=namespaces,
-                )
-                if len(thesaurus_iris) > 0:
-                    thesaurus_iri = thesaurus_iris[0]
-                else:
-                    thesaurus_iris = thesaurus.xpath(
-                        f"{prefix_2}:CI_Citation/{prefix_2}:identifier/{prefix_2}:MD_Identifier/{prefix_2}:code/gmx:Anchor/@xlink:href",
-                        namespaces=namespaces,
-                    )
-                    if len(thesaurus_iris) > 0:
-                        thesaurus_iri = thesaurus_iris[0]
-                    else:
-                        thesaurus_iri = None
-
-            thesaurus_names = thesaurus.xpath(f"@xlink:title", namespaces=namespaces)
-            if len(thesaurus_names) > 0:
-                thesaurus_name = thesaurus_names[0]
-            else:
-                thesaurus_names = thesaurus.xpath(
-                    f"{prefix_2}:CI_Citation/{prefix_2}:title/gco:CharacterString/text()",
-                    namespaces=namespaces,
-                )
-                if len(thesaurus_names) > 0:
-                    thesaurus_name = thesaurus_names[0]
-                else:
-                    thesaurus_name = None
-
-            if thesaurus_name is not None and thesaurus_iri is None:
-                thesaurus_iri = make_thesaurus_iri(thesaurus_name)
-
-            if thesaurus_iri is not None:
-                theses[thesaurus_iri] = {
-                    "name": thesaurus_name.strip() if thesaurus_name is not None else None,
-                    "keywords": kws
-                }
-
         if len(thesauruses) < 1:  # i.e. this keyword_set has no thesaurus
-            if theses.get("") is None:
-                theses[""] = {
+            if theses.get("empty") is None:
+                theses["empty"] = {
                     "name": "",
                     "keywords": []
                 }
 
-            theses[""]["keywords"] = theses[""]["keywords"] + kws
+            theses["empty"] = {
+                "name": "",
+                "keywords": theses["empty"]["keywords"] + kws
+            }
+        else:
+            for thesaurus in thesauruses:
+                thes_iri, thes_name = match_thesaurus(thesaurus, namespaces, prefix_2)
+
+                theses[thes_iri] = {
+                    "name": thes_name,
+                    "keywords": kws
+                }
 
     return doc_iri, theses
 
 
-def match_thes_to_kb(thes_iri: str, thes_name: str) -> {}:
-    # see if we have an aliasFor IRI for this thesaurus
-    q = """
-        PREFIX sa: <https://w3id.org/semanticanalyser/>
-        
-        SELECT ?iri
-        WHERE {
-          GRAPH sa:system-graph {
-            ?iri sa:hasAlias <XXXX>
-          }
-        }    
-        """.replace("XXXX", thes_iri)
-    r = send_query_to_db(q)
-    if len(r) > 0:
-        return r[0]["iri"]["value"]
+def match_kw_to_kb(kw_text: str, kw_iri: str = None, thes_iri: str = None) -> str:
+    if kw_iri is None and kw_text is None:
+        return None
 
-    if thes_name is not None:
-        # if not, see if we can name match the thesaurus
-        q = """
-            PREFIX dcat: <http://www.w3.org/ns/dcat#>
-            PREFIX sa: <https://w3id.org/semanticanalyser/>
-            PREFIX schema: <https://schema.org/>
-            PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
-            
-            SELECT ?iri
-            WHERE {
-              {
-                SELECT DISTINCT ?iri ?l ?w ?p ?theme
-                WHERE {
-                  GRAPH sa:system-graph {
-                    {     
-                      BIND (10 AS ?w)
-                      ?iri skos:prefLabel ?l .          
-                          
-                      FILTER (?l = "XXXX")
-                    }
-                    UNION
-                    { 
-                      BIND (9 AS ?w)
-                      ?iri skos:altLabel ?l .
-                
-                      FILTER (?l = "XXXX")
-                    }
-                    UNION
-                    {     
-                      BIND (8 AS ?w)
-                      ?iri skos:prefLabel ?l .          
-                          
-                      FILTER (CONTAINS(?l, "XXXX"))
-                    }
-                    UNION
-                    { 
-                      BIND (7 AS ?w)
-                      ?iri skos:altLabel ?l .
-                
-                      FILTER (CONTAINS(?l, "XXXX"))
-                    }
-                    
-                    OPTIONAL {
-                      ?iri sa:hasPreference [
-                        schema:value ?p ;
-                        dcat:theme ?theme ;
-                      ] .        
-                    }
-                  }  
-                }
-                ORDER BY DESC(?w)
-              }
-              FILTER (?w > 8)  # exact prefLabel and altLabel matches only for now
-          }
-        """.replace("XXXX", thes_name)
-        r = send_query_to_db(q)
-        if len(r) > 0:
-            return r[0]["iri"]["value"]
+    # try cache
+    x = cache_get(kw_text, thes_iri)
+    if x is not None:
+        return x
 
-    return None
-
-
-def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
-    kw_cache = {
-        "earth science > paleoclimate > tree ring": "https://gcmd.earthdata.nasa.gov/kms/concept/0e06e528-e796-4b7c-9878-dbcb061d878d",
-        "What: total ring width; Material: null": "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=3639",
-        "What: tree ring standardized growth index; Material: null": "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=682",
-        "What: age; Material: null": "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=241"
-
-    }
-    if kw_text in kw_cache.keys():
-        return kw_cache[kw_text]
-    elif kw_text.startswith("What:"):
-        kw_text = kw_text.replace("What: ", "")
-        kw_text = kw_text.split(";")[0].strip()
-
+    # try well-known IRIs
     if kw_iri is not None:
         if "https://www.ncei.noaa.gov/archive/accession/" in kw_iri:
             return kw_iri
@@ -260,6 +291,13 @@ def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
         if kw_iri.startswith("http://vocab.nerc.ac.uk"):
             return kw_iri
 
+    if kw_iri is not None and kw_text is None:
+        return kw_iri
+
+    # tidy the text
+    if kw_text.startswith("What:"):
+        kw_text = kw_text.replace("What: ", "")
+        kw_text = kw_text.split(";")[0].strip()
     if "/" in kw_text:
         if kw_text.endswith("/"):
             kw_text = kw_text.split("/")[-2].strip()
@@ -268,6 +306,7 @@ def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
     if ">" in kw_text:
         kw_text = kw_text.split(">")[-1].strip()
 
+    # try matching to an ID (notation)
     if "_" in kw_text:
         # this looks like an ID, so try to match it to a notation
         q = """
@@ -290,6 +329,8 @@ def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
     # we haven't nicely matched it to an ID, so remove the "_" to allow for better text matching
     kw_text = kw_text.replace("_", " ")
 
+
+    # searching by IRI
     if thes_iri is not None:
         if kw_iri is not None:
             q = """
@@ -403,24 +444,29 @@ def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
 
     if len(r) > 0:
         return r[0]["iri"]["value"]
-    else:
-        if kw_text.startswith("http"):
-            q = """
-                PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
-                
-                ASK
-                WHERE {
-                    <XXX> a skos:Concept .
-                }            
-                """.replace("XXX", kw_iri)
 
-            if send_query_to_db(q):
-                return kw_iri
 
+    # if the kw_text is really an IRI
+    if kw_text.startswith("http"):
+        q = """
+            PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+            
+            ASK
+            WHERE {
+                <XXX> a skos:Concept .
+            }            
+            """.replace("XXX", kw_iri)
+
+        if send_query_to_db(q):
+            return kw_iri
+
+
+    # full-text search using value
+    if kw_text:
         q = """
             PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
             PREFIX text:    <http://jena.apache.org/text#>
-
+    
             SELECT *
             WHERE {
                 (?iri ?score ?pl ?g) text:query ("ZZZ")
@@ -436,7 +482,8 @@ def match_kw_to_kb(kw_text:str, kw_iri: str = None, thes_iri: str = None):
         if len(r) > 0:
             return r[0]["iri"]["value"]
 
-        return kw_text
+    # got nuthin' so return original text
+    return kw_text
 
 
 def get_best_guess_kws(path_to_file_or_etree: Union[Path, etree]):
@@ -444,27 +491,13 @@ def get_best_guess_kws(path_to_file_or_etree: Union[Path, etree]):
 
     doc_iri, thesauri = get_thes_and_kws(et)
 
-    replacement_iris = []
-
-    for k, v in thesauri.items():
-        if v["name"] != "":
-            better_iri = match_thes_to_kb(k, v["name"])
-            if better_iri is not None:
-                replacement_iris.append((better_iri, k))
-
-    for replacement_iri in replacement_iris:
-        thesauri[replacement_iri[0]] = thesauri.pop(replacement_iri[1])
-
     for thesaurus, content in thesauri.items():
-        thesaurus = None if thesaurus == "" else thesaurus
+        thesaurus = None if thesaurus == "empty" else thesaurus
 
         improved_kws = []
         for kw in content["keywords"]:
             kw_iri = kw["value"] if kw["value"].startswith("http") else None
             val = match_kw_to_kb(kw["value"], kw_iri, thesaurus)
-            # print(kw)
-            # print(kw_iri)
-            # print(val)
 
             theme = kw["theme"]
             improved_kws.append({
@@ -473,7 +506,8 @@ def get_best_guess_kws(path_to_file_or_etree: Union[Path, etree]):
                 "thesaurus": thesaurus,
                 "original": kw["value"]
             })
-        thesauri[thesaurus if thesaurus is not None else ""]["keywords"] = improved_kws
+
+        thesauri["empty" if thesaurus is None else thesaurus]["keywords"] = improved_kws
 
     return doc_iri, thesauri
 
@@ -512,9 +546,31 @@ def present_results(thesauri):
     print(table)
 
 
+def cache_add(thesauri):
+    for thesaurus, content in thesauri.items():
+        for kw in content["keywords"]:
+            KW_CACHE.add((kw["original"], kw["thesaurus"], kw["value"]))
+
+
+def cache_get(value, thesaurus):
+    for entry in KW_CACHE:
+        if entry[0] == value and entry[1] == thesaurus:
+            return entry[2]
+    else:
+        return None
+
+
+def thes_cache_get(thes_iri):
+    for entry in THES_CACHE:
+        if entry[0] == thes_iri:
+            return entry[1], entry[2]
+    return None, None
+
+
 def convert_results_to_graph(thesauri: {}, doc_iri: str) -> Graph:
     g = Graph()
-    g.add((URIRef(doc_iri), RDF.type, SDO.CreativeWork))
+    doc_iri = URIRef(doc_iri)
+    g.add((doc_iri, RDF.type, SDO.CreativeWork))
     for thesaurus, content in thesauri.items():
         for kw in content["keywords"]:
             if kw["value"].startswith("http"):
@@ -528,7 +584,13 @@ def convert_results_to_graph(thesauri: {}, doc_iri: str) -> Graph:
                 if kw["original"].startswith("http"):
                     g.add((kw_iri, SDO.replacee, URIRef(kw["original"])))
                 else:
-                    g.add((kw_iri, SDO.citation, Literal(kw["original"])))
+                    if isinstance(kw_iri, BNode):
+                        g.add((kw_iri, SDO.value, Literal(kw["original"])))
+                    else:
+                        c = BNode()
+                        g.add((kw_iri, SDO.citation, c))
+                        g.add((c, SDO.value, Literal(kw["original"])))
+                        g.add((c, SDO.isBasedOn, doc_iri))
             else:
                 if not kw["original"].startswith("http"):
                     g.add((kw_iri, SDO.value, Literal(kw["original"])))
@@ -539,96 +601,112 @@ def convert_results_to_graph(thesauri: {}, doc_iri: str) -> Graph:
                 else:
                     g.add((kw_iri, SDO.inDefinedTermSet, Literal(kw["thesaurus"])))
 
-            g.add((URIRef(doc_iri), SDO.keywords, kw_iri))
-    g.add((URIRef(doc_iri), RDF.type, SDO.CreativeWork))
+            g.add((doc_iri, SDO.keywords, kw_iri))
+    g.add((doc_iri, RDF.type, SDO.CreativeWork))
 
     return g
 
 
-def process_all_records(starting_record: None = 1, no_to_process: None = 100):
-    start = time.process_time()
+def cache_prep(kw_cache_file, KW_CACHE):
+    if len(KW_CACHE) == 0:
+        if Path(kw_cache_file).is_file():
+            KW_CACHE = pickle.load(open(kw_cache_file, "rb"))
+        else:
+            KW_CACHE = [
+                ("earth science > paleoclimate > tree ring",
+                 "https://gcmd.earthdata.nasa.gov/kms/concepts/concept_scheme/sciencekeywords ",
+                 "https://gcmd.earthdata.nasa.gov/kms/concept/0e06e528-e796-4b7c-9878-dbcb061d878d"),
+                ("What: total ring width; Material: null",
+                 "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=3639"),
+                ("What: tree ring standardized growth index; Material: null",
+                 "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=682"),
+                ("What: age; Material: null", "https://www.ncei.noaa.gov/access/paleo-search/cvterms?termId=241")
+            ]
+            pickle.dump(KW_CACHE, open(kw_cache_file, "wb"))
 
-    records_dir = Path("/Users/nick/Work/bodc/sa-records")
+    print(f"KW_CACHE: {len(KW_CACHE)}")
 
-    for idx, record in enumerate(open("records-index.txt").readlines()):
-        if (idx + 1) < starting_record:
-            continue
 
-        record_path = records_dir.joinpath(record.strip())
-
-        # Process the record
-        doc_iri, thesauri = get_best_guess_kws(record_path)
-        nt = convert_results_to_graph(thesauri, doc_iri).serialize(format="nt")
-        open("record-keywords.2.nt", "a").write(nt + "\n\n")
-
-        open("records-index-processed.txt", "a").write(record)
-
-        if (idx + 2) - starting_record >= no_to_process:
-            tdiff = time.process_time() - start
-            print(f"End: {tdiff:.2f}s")
-            avg = tdiff / no_to_process
-            timing = f"No. {no_to_process} in {tdiff:.2f}s is {avg:.2f}s per record\n"
-            open("records-processing-timing.txt", "a").write(timing)
-
-            return
+def cache_store(kw_cache_file, KW_CACHE):
+    pickle.dump(KW_CACHE, open(kw_cache_file, "wb"))
 
 
 if __name__ == "__main__":
-    start = time.time()
-    resulting_nt_file = Path(__file__).parent / "noaa-paleoclimatlog-keywords.nt"
-    # record_sample = sample_records(3)
+    THES_CACHE = set()
+    KW_CACHE = set()
+    kw_cache_file = "KW_CACHE.p"
 
-    #record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/0098a856-7401-46c2-9f7a-a2e5c0cf899c.xml")]
+    cache_prep(kw_cache_file, KW_CACHE)
+
+    t1_start = perf_counter()
+
+    # records =  sample_records(3)
+
+    # records = [Path("/Users/nick/Work/bodc/sa-records/ifremer/0098a856-7401-46c2-9f7a-a2e5c0cf899c.xml")]
     #   * missing target application vocab online - https://sextant.ifremer.fr/geonetwork/srv/api/registries/vocabularies/local.target-application.myocean.target-application
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/sdn-open:urn:SDN:CDI:LOCAL:696-486-486-ds07-4.xml")]
+    # records =  [Path("/Users/nick/Work/bodc/sa-records/ifremer/sdn-open:urn:SDN:CDI:LOCAL:696-486-486-ds07-4.xml")]
     # 100%
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/f632d0d4-3373-43a4-a6be-d2109ebe0177.xml")]
+    # records =  [Path("/Users/nick/Work/bodc/sa-records/ifremer/f632d0d4-3373-43a4-a6be-d2109ebe0177.xml")]
     # 100%
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/01f36842-927c-43a8-a531-f3c5096f3b34.xml")]
+    # records =  [Path("/Users/nick/Work/bodc/sa-records/ifremer/01f36842-927c-43a8-a531-f3c5096f3b34.xml")]
     # 21/37 - no thes for non-matches
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/0c6e6b99-eaa6-41f7-b9f5-8a84d60b02b0.xml")]
+    # records =  [Path("/Users/nick/Work/bodc/sa-records/ifremer/0c6e6b99-eaa6-41f7-b9f5-8a84d60b02b0.xml")]
     # 100s of Accession Records
     # GCMD Providers vocab missed <https://gcmd.earthdata.nasa.gov/kms/concept/086c68e5-1c94-4f2f-89d5-0453443ff249> - added
     # GCSM Science Keywords missing <https://gcmd.earthdata.nasa.gov/kms/concept/cd5a4729-ea4a-4ce1-8f5a-ec6a76d31055> - not yet added
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/ifremer/a54ac0ea-b4f9-48cb-ae55-f84c78848a28.xml")]
+    # records =  [Path("/Users/nick/Work/bodc/sa-records/ifremer/a54ac0ea-b4f9-48cb-ae55-f84c78848a28.xml")]
     # 100%
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog/0be5e200-0742-4744-8b31-337f7144d444.xml")]
+    # records =  [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog/0be5e200-0742-4744-8b31-337f7144d444.xml")]
     # 23s
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog/0be5e200-0742-4744-8b31-337f7144d444.2.xml")]
+    # records =  [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog/0be5e200-0742-4744-8b31-337f7144d444.2.xml")]
     # dedupe
     # 4s
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog/fff282ca-6097-4660-a416-73d3ba3d768f.xml")]
+    # record_sample = [Path("/home/nick/work/bodc/sa-records/paleoclimatolog_04/fff282ca-6097-4660-a416-73d3ba3d768f.xml")]
     # 2s
 
     #record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe/fff282ca-6097-4660-a416-73d3ba3d768f.xml")]
     # dedupe
     # 2s
 
-    # record_sample = [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe/93c28262-4a53-4383-966e-8f088e8a3723.xml")]
+    # records =  [Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe/93c28262-4a53-4383-966e-8f088e8a3723.xml")]
 
-    record_sample = sorted(Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe").glob("*.xml"))
-    start = 15071
+    # records =  sorted(Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe").glob("*.xml"))
+    # records =  [Path(__file__).parent.parent.resolve().parent / "sa-records/cmems/0048F0DF85529BD09AA6FD32D8BD6DBB0F34AD89.xml"]
+
+    resulting_nt_file = Path(__file__).parent / "cmems-keywords.nt"
+    records = sorted(Path("/home/nick/work/bodc/sa-records/cmems").glob("*.xml"))
+    # records = [Path("/home/nick/work/bodc/sa-records/cmems/16C19EC0E78FA0AD7B5985D26599F1CF633E2BE7.xml")]
+    start = 0
     count = 0
-    for r in record_sample[start:]:
+    for r in records[start:]:
         print(r)
+        # get the KWs
         doc_iri, thesauri = get_best_guess_kws(r)
+        # print the results to screen
         present_results(thesauri)
+        # save the results to an RDF file
         with open(resulting_nt_file, "a") as f:
             f.write(convert_results_to_graph(thesauri, doc_iri).serialize(format="nt"))
             f.write("\n\n")
+        # put results in the cache
+        cache_add(thesauri)
+
         count += 1
         print(f"record no. {count}")
+        print(f"cache len. {len(KW_CACHE)}")
 
-    end = time.time()
-    print("time: " + str(end - start))
+    cache_store(kw_cache_file, KW_CACHE)
+
+    t1_stop = perf_counter()
+    print("Elapsed time :", t1_stop - t1_start)
 
     # process_all_records(5000, 1001)
 

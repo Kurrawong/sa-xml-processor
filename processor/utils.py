@@ -140,7 +140,7 @@ def send_query_to_db(query):
         "http://localhost:3030/ds",
         headers={"Accept": "application/sparql-results+json"},
         params={"query": query},
-        timeout=20
+        timeout=30
     )
     if r.status_code == 400:
         print(r.text)
