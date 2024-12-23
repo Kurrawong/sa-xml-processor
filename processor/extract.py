@@ -438,7 +438,7 @@ def match_kw_to_kb(kw_text: str, kw_iri: str = None, thes_iri: str = None) -> st
                 }
                 ORDER BY DESC(?score)
                 LIMIT 3
-                """.replace("ZZZ", kw_text)
+                """.replace("ZZZ", kw_text.replace(":", " ").replace(",", ""))
 
     r = send_query_to_db(q)
 
@@ -475,7 +475,7 @@ def match_kw_to_kb(kw_text: str, kw_iri: str = None, thes_iri: str = None) -> st
             }
             ORDER BY DESC(?score)
             LIMIT 3
-            """.replace("ZZZ", kw_text)
+            """.replace("ZZZ", kw_text.replace(":", " ").replace(",", ""))
 
         r = send_query_to_db(q)
 
@@ -681,8 +681,8 @@ if __name__ == "__main__":
     # records =  sorted(Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe").glob("*.xml"))
     # records =  [Path(__file__).parent.parent.resolve().parent / "sa-records/cmems/0048F0DF85529BD09AA6FD32D8BD6DBB0F34AD89.xml"]
 
-    resulting_nt_file = Path(__file__).parent / "cmems-keywords.nt"
-    records = sorted(Path("/home/nick/work/bodc/sa-records/cmems").glob("*.xml"))
+    resulting_nt_file = Path(__file__).parent / "cmems-non-keywords.nt"
+    records = sorted(Path("/home/nick/work/bodc/sa-records/cmems-non").glob("*.xml"))
     # records = [Path("/home/nick/work/bodc/sa-records/cmems/16C19EC0E78FA0AD7B5985D26599F1CF633E2BE7.xml")]
     start = 0
     count = 0
