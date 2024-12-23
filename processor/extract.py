@@ -533,7 +533,7 @@ def present_results(thesauri):
     kw_only = []
     for thesaurus, content in thesauri.items():
         for kw in content["keywords"]:
-            kw_only.append((kw["theme"], kw["value"], kw["thesaurus"], kw["original"]))
+            kw_only.append((kw["theme"], kw["value"], kw.get("thesaurus"), kw["original"]))
 
     from operator import itemgetter
     # kw_only.sort(key=itemgetter(0, 1))
@@ -681,9 +681,9 @@ if __name__ == "__main__":
     # records =  sorted(Path("/Users/nick/Work/bodc/sa-records/noaa-paleoclimatolog-dedupe").glob("*.xml"))
     # records =  [Path(__file__).parent.parent.resolve().parent / "sa-records/cmems/0048F0DF85529BD09AA6FD32D8BD6DBB0F34AD89.xml"]
 
-    resulting_nt_file = Path(__file__).parent / "cmems-non-keywords.nt"
-    records = sorted(Path("/home/nick/work/bodc/sa-records/cmems-non").glob("*.xml"))
-    # records = [Path("/home/nick/work/bodc/sa-records/cmems/16C19EC0E78FA0AD7B5985D26599F1CF633E2BE7.xml")]
+    folder = "capital"
+    resulting_nt_file = Path(__file__).parent / f"{folder}-keywords.nt"
+    records = sorted(Path(f"/home/nick/work/bodc/sa-records/{folder}").glob("*.xml"))
     start = 0
     count = 0
     for r in records[start:]:
